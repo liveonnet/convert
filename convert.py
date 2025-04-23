@@ -306,6 +306,7 @@ class InfoResult(NamedTuple):
     main_bitrate: int
     main_fps: int
     main_resolution: str
+    main_duration: str
     cmd_main_stream: str
     cmd_copy_stream: str
     desc: str
@@ -317,10 +318,10 @@ class Result(NamedTuple):
 
 def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
     is_valid, err = False, ''
-    _main_encoder, _main_bitrate, _main_fps, _main_resolution, _cmd_main_stream, _cmd_copy_stream, _desc = '', 0, 0, '', '', '', ''
+    _main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc = '', 0, 0, '', '', '', '', ''
     if not os.path.exists(fname) or os.stat(fname).st_size == 0:
         err = 'file not exist or 0 bytes'
-        return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _cmd_main_stream, _cmd_copy_stream)
+        return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
 
     _old_size = os.stat(fname).st_size
     _cmd = f'{ffprobe} -v error -hide_banner -show_streams -of json -i "{fname}"'
@@ -329,6 +330,7 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
     if _rslt.stdout:
         try:
             _i_v, _i_a, _i_s = 0, 0, 0  # index video audio subtitle 
+            cmd_vf = ''
             j_data = json.loads(_rslt.stdout)
             for _i, _d in enumerate(j_data['streams']):
                 _codec_name, _codec_type, _pix_fmt, _duration, _bitrate = _d['codec_name'], _d['codec_type'], _d.get('pix_fmt', 'N/A'), int(float(_d.get('duration', 0))), int(_d.get('bit_rate', 0) if _d.get('bit_rate', 'N/A') != 'N/A' else 0)
@@ -344,18 +346,25 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                     _main_fps = calc_fps(_d, hms2sec(_duration))
                     if _main_fps > 31:
                         debug(f'\tfps {_main_fps} -> 30')
-                        _cmd_main_stream = '-vf "fps=30" ' + _cmd_main_stream
+                        if not cmd_vf:
+                            cmd_vf = '-vf "fps=30'
+                        else:
+                            cmd_vf += ',fps=30'
                     _main_resolution = f'{_d.get("width", "")}x{_d.get("height", "")}'
                     if len(_main_resolution) < 5:
                         _main_resolution = f'{_d.get("coded_width", "")}x{_d.get("coded_height", "")}'
                     w, h =  _main_resolution.split('x', 2)
                     if int(w) > 1920 and int(h) > 1080:
                         debug(f'\tresolution {_main_resolution} -> 1920x1080')
-                        _cmd_main_stream = '-vf "scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" ' + _cmd_main_stream
+                        if not cmd_vf:
+                            cmd_vf = '-vf "scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2'
+                        else:
+                            cmd_vf += ',scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2'
                     assert _main_bitrate
                     assert _duration
+                    _main_duration = _duration
                     assert _main_fps
-                    _desc += f'{_duration}, {_codec_type}:{_codec_name} {_d.get("pix_fmt", "")} {_d.get("field_order", "")} {_d.get("display_aspect_ratio", "")} {_main_resolution}@{_main_fps}fps {bitrate_hum(_main_bitrate)}\n'
+                    _desc += f'{_duration}, {_codec_type}:{_codec_name} {_d.get("pix_fmt", "")}({_d.get("field_order", "")}), {_d.get("display_aspect_ratio", "")} {_main_resolution}@{_main_fps}fps {bitrate_hum(_main_bitrate)}\n'
                     debug(f'\t*video#{_i}:{_i_v} {_codec_name}:{_codec_type}, {_duration}, {bitrate_hum(_main_bitrate)}, {_main_fps}fps, {_main_resolution}')
                     _i_v += 1
                 else:
@@ -389,14 +398,19 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                         #_i_s += 1
                     else:
                         warn(f'\tunknown stream#{_i}: {_codec_name}:{_codec_type}, {_duration}, {bitrate_hum(_bitrate)}')
-            if _main_encoder and _main_bitrate and _main_fps and _main_resolution and _cmd_main_stream and _cmd_copy_stream:
+            if cmd_vf:
+                cmd_vf += '" '
+                _cmd_main_stream = cmd_vf + _cmd_main_stream
+                if cmd_vf.find('scale=1920') != -1:
+                    _cmd_main_stream += ' -s 1920x1080 '
+            if _main_encoder and _main_bitrate and _main_fps and _main_resolution and _main_duration and _cmd_main_stream and _cmd_copy_stream:
                 is_valid = True
         except:
             err = _rslt.stderr
             debug(f'{_rslt.stderr=}')
             #raise
 
-    return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _cmd_main_stream, _cmd_copy_stream, _desc)
+    return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
 
 
 def main():
@@ -416,7 +430,7 @@ def main():
     #logging.basicConfig(format='%(asctime)s %(levelname).1s %(funcName)+10s:%(lineno).03d| %(message)s', datefmt='%Y%m%d_%H%M%S', level=log_level)
     logging.basicConfig(format='{asctime} {levelname:.1s} {funcName:>10.10s}:{lineno:03d}| {message}', datefmt='%Y%m%d_%H%M%S', style='{', level=log_level)
     
-    MIN_SIZE = 1 * 1024 * 1024 * 1024
+    MIN_SIZE = 5 * 1024 * 1024 * 1024
     SIZE_1G = 1 * 1024 *1024 * 1024
     SIZE_2G = 2 * 1024 * 1024 * 1024
     SIZE_3G = 3 * 1024 * 1024 * 1024
@@ -432,41 +446,45 @@ def main():
         for _f in l_files:
             _err = ''
             debug(f'check file {_f} ...')
+            checked += 1
             _old_size = os.stat(_f).st_size
             if _old_size < MIN_SIZE:
-                info(f'skip small file {size_hum(_old_size)} {_f}')
+                debug(f'skip small file {size_hum(_old_size)} {_f}')
+                skipped += 1
                 continue
 
-            _main_encoder, _main_bitrate, _main_fps, _main_resolution, _cmd_main_stream, _cmd_copy_stream = '', 0, 0, '', '', ''
+            _main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream = '', 0, 0, '', '', '', ''
             if os.path.splitext(_f)[0].endswith('.H265'):  # 本身是带.H265字样的，检查是否是有效的H265文件
-                _valid, _err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _cmd_main_stream, _cmd_copy_stream, _) = check_hevc(_f)
+                _valid, _err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _) = check_hevc(_f)
                 if _valid and _main_encoder == 'hevc':
-                    info(f'skip h265 file {_f}')
+                    debug(f'skip h265 file {_f}')
+                    skipped += 1
                     continue
                 else:
-                    info(f'skip BAD h265 file {_f}')
+                    warn(f'skip BAD h265 file {_f}')
+                    skipped += 1
                     continue
-            else:
-                _f_converted = '.H265'.join(os.path.splitext(_f))
-                if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
-                    _valid, *_ = check_hevc(_f_converted)
-                    if _valid:
-                        info(f'skip converted file {_f}')
-                        continue
 
             _old_size = os.stat(_f).st_size
             if _old_size == 0:
-                info(f'skip 0 bytes file {_f}')
+                warn(f'skip 0 bytes file {_f}')
+                skipped += 1
                 continue
 
             if not _main_encoder:
-                _valid, _err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _cmd_main_stream, _cmd_copy_stream, _desc) = check_hevc(_f)
+                _valid, _err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc) = check_hevc(_f)
             assert _valid and _main_encoder
+            _f_converted = '.H265'.join(os.path.splitext(_f))
+            if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
+                _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)
+                if _valid and abs(hms2sec(_dur) < hms2sec(_main_duration)) < 1:
+                    debug(f'skip converted file {_f}')
+                    skipped += 1
+                    continue
 
             _f_converted = '.H265'.join(os.path.splitext(_f))
             _need = True if _main_encoder != 'hevc' else False
-            checked += 1
-            info(f'file info: {size_hum(_old_size)} {_desc.replace('\n', ',')} {"need" if _need else "no_need"} {_err or ""} {_f}')
+            info(f'file info: {size_hum(_old_size)} {_desc.replace('\n', ', ')} {"need" if _need else "no_need"} {_err or ""} {_f}')
             if _err:
                 check_err += 1
                 continue
@@ -504,17 +522,25 @@ def main():
 #                # 核显解码 独显编码 最初使用
             #_cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
             _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_initial_qp_after_scene_change 18 -pa_max_qp_before_force_skip 35 -pa_caq_strength high -pa_frame_sad_enable true -pa_ltr_enable true -pa_paq_mode caq -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
+
+            # 独显编解码的具体例子，注意：如果用这个，则滤镜插件的命令cmd_vf也需要改动, 开头加上hwdownload,format=nv12，结尾加上hwupload
+            # -vf "hwdownload,format=nv12,scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,hwupload"  因为滤镜需要cpu计算，所以数据要从显存copy到内存，指定为nv12格式，做scale和重设fps，然后再将结果copy回显存
+            #_cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d11va -hwaccel_device 1 -hwaccel_output_format d3d11  -i "{_f}" -vf "hwdownload,format=nv12,scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,hwupload" -map 0:v:0 -c:v:0 hevc_amf -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_initial_qp_after_scene_change 18 -pa_max_qp_before_force_skip 35 -pa_caq_strength high -pa_frame_sad_enable true -pa_ltr_enable true -pa_paq_mode caq -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
+
             # 核显解码 独显编码 
 #                _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -usage transcoding -rc qvbr -qvbr_quality_level 28 -qp_i 24 -qp_p 26 -min_qp_i 24 -max_qp_i 24 -min_qp_p 26 -max_qp_p 26 -preset quality -g {int(10 * round(_main_fps))} -profile:v main -header_insertion_mode gop -preanalysis true -bf 4 -refs 5 -bufsize {_main_bitrate * 2} -maxrate {_main_bitrate} {_cmd_copy_stream}  "{_f_converted}"'''
 #                _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -usage transcoding -global_quality 28 -rc cqp -qp_i 24 -qp_p 26 -min_qp_i 24 -max_qp_i 24 -min_qp_p 26 -max_qp_p 26 -quality quality -pix_fmt yuv420p {_cmd_copy_stream}  "{_f_converted}"'''
 
             debug(f'convert ({factor=}) to {_f_converted} ...')
-            info(f'{_cmd=}')
+            info(f'{factor=} cmd={_cmd}')
+            if args.nr_convert == 0:
+                warn(f'skip convert file cause nr_convert=0')
+                break
             call_ffmpeg(_cmd, args.use_tqdm)
             _new_size = os.stat(_f_converted).st_size if os.path.exists(_f_converted) else 0
             _single_saved = (_old_size - _new_size) if _new_size else 0
-            _valid, *_ = check_hevc(_f_converted)  # 通过获取信息确定生成的文件是否有效
-            if _valid and _single_saved > 0:
+            _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)  # 通过获取信息确定生成的文件是否有效
+            if _valid and _single_saved > 0 and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 1:
                 converted += 1
                 info(f'{size_hum(_old_size)} -> {size_hum(_new_size)} saved {size_hum(_single_saved)} {round(_single_saved / _old_size * 100, 2)}% factor_target={round((1 - factor) * 100, 2)}%')
                 l_converted.append(_f_converted)
@@ -537,9 +563,9 @@ def main():
                     warn(f'converted file is larger!!! {size_hum(_old_size)} -> {size_hum(_new_size)} +{size_hum(abs(_single_saved))}')
                 convert_err += 1
             total_saved += _single_saved
-            if converted >= args.nr_convert or convert_err >= args.nr_convert:
+            if args.nr_convert >0 and (converted >= args.nr_convert or convert_err >= args.nr_convert):
                 break
-        if converted >= args.nr_convert or convert_err >= args.nr_convert:
+        if args.nr_convert >0 and (converted >= args.nr_convert or convert_err >= args.nr_convert):
             break
         
     info(f'done. {checked=:,} {skipped=:,} {check_err=:,} {convert_err=:,} {converted=:,} total_saved={size_hum(total_saved)}')
