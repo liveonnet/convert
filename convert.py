@@ -10,6 +10,7 @@ import argparse
 from typing import Tuple
 from typing import NamedTuple
 import logging
+import winsound
 from tqdm import tqdm
 info, debug, error, warn = logging.info, logging.debug, logging.error, logging.warning
 
@@ -104,7 +105,7 @@ class ProgressNotifier(object):
 
     def __call__(self, char, stdin = None):
         if isinstance(char, str):
-            char = char.encode('utf8')
+            char = char.encode('utf8', errorerrors='replace')
         if char in b"\r\n":
             line = self.newline()
             if self.duration is None:
@@ -126,6 +127,7 @@ class ProgressNotifier(object):
     def newline(self):
         line = bytes(self.line_acc)
         self.lines.append(line)
+        self.lines[:] = self.lines[-2:]
         self.line_acc = bytearray()
         return line
 
@@ -144,7 +146,7 @@ class ProgressNotifier(object):
     def get_source(self, line):
         search = self._SOURCE_RX.search(line)
         if search is not None:
-            return shorten(os.path.basename(search.group(1).decode(self.encoding)), 40, '[...]')
+            return shorten(os.path.basename(search.group(1).decode(self.encoding)), 50, '[...]')
         return None
 
     def progress(self, line):
@@ -180,10 +182,12 @@ def call_ffmpeg(cmd: str, use_tqdm: bool = False):
     else:
         try:
             with ProgressNotifier(file=sys.stderr, encoding='utf8', tqdm=tqdm) as notifier:
-                p = subprocess.Popen(cmd, stderr=subprocess.PIPE, bufsize=1, text=True, encoding='utf8')
+                #p = subprocess.Popen(cmd, stderr=subprocess.PIPE, bufsize=1, text=True, encoding='utf8')
+                p = subprocess.Popen(cmd, stderr=subprocess.PIPE, bufsize=-1)
                 while True:
                     out = p.stderr.read(1)
                     if out:
+                        #notifier(out.decode('utf8', errors='replace'))
                         notifier(out)
                     if p.poll() is not None:
                         break
@@ -263,6 +267,12 @@ def calc_duration(d: json) -> str:
         if (tags := d.get('tags')):
             duration = tags.get('DURATION-eng', '')
             if not duration:
+                duration = tags.get('DURATION', '')
+                if duration:
+                    debug(f'\t\tvideo duration in tags["DURATION"]: {duration}')
+            else:
+                debug(f'\t\tvideo duration in tags["DURATION-eng"]: {duration}')
+            if not duration:
                 _frames = int(tags.get('NUMBER_OF_FRAMES-eng', '0'))
                 _frm_per_sec = d.get('avg_frame_rate', '0')
                 if _frm_per_sec.find('/') != -1:
@@ -273,19 +283,21 @@ def calc_duration(d: json) -> str:
                 if _frames and _frm_per_sec:
                     duration = sec_hum(_frames / _frm_per_sec)
                     debug(f'\t\tv duration calc: {duration}')
-            else:
-                debug(f'\t\tvideo duration in tags["DURATION-eng"]: {duration}')
     elif d['codec_type'] == 'audio':
         if (tags := d.get('tags')):
             duration = tags.get('DURATION-eng', '')
+            if not duration:
+                duration = tags.get('DURATION', '')
+                if duration:
+                    debug(f'\t\ta duration in tags["DURATION"]: {duration}')
+            else:
+                debug(f'\t\ta duration in tags["DURATION-eng"]: {duration}')
             if not duration:
                 _bps = int(tags.get('BPS-eng', '0'))
                 _bytes = int(tags.get('NUMBER_OF_BYTES-eng', '0'))
                 if _bps and _bytes:
                     duration = sec_hum(_bytes * 8 / _bps)
                     debug(f'\t\ta duration calc: {duration}')
-            else:
-                debug(f'\t\ta duration in tags["DURATION-eng"]: {duration}')
     elif d['codec_type'] == 'subtitle':
         if (tags := d.get('tags')):
             duration = tags.get('DURATION-eng', '')
@@ -304,7 +316,7 @@ def calc_duration(d: json) -> str:
 class InfoResult(NamedTuple):
     main_encoder: str
     main_bitrate: int
-    main_fps: int
+    main_fps: int|float
     main_resolution: str
     main_duration: str
     cmd_main_stream: str
@@ -338,13 +350,14 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                     _duration = sec_hum(_duration)
                 if not _duration:
                     _duration = calc_duration(_d)
+                assert _duration
                 if not _bitrate:
                     _bitrate = calc_bitrate(_d, _old_size, hms2sec(_duration))
                 if (not _main_encoder) and _codec_type == 'video' and _codec_name != 'mjpeg':
                     _main_encoder, _main_bitrate = _codec_name, _bitrate
                     _cmd_main_stream = f'-map 0:v:{_i_v} -c:v:{_i_v} hevc_amf '
                     _main_fps = calc_fps(_d, hms2sec(_duration))
-                    if _main_fps > 31:
+                    if _main_fps > 32:
                         debug(f'\tfps {_main_fps} -> 30')
                         if not cmd_vf:
                             cmd_vf = '-vf "fps=30'
@@ -360,10 +373,10 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                             cmd_vf = '-vf "scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2'
                         else:
                             cmd_vf += ',scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2'
-                    assert _main_bitrate
-                    assert _duration
+                    if (not _main_bitrate) or (not _duration) or (not _main_fps):
+                        err = 'empty main_bitrate/duration/fps'
+                        return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
                     _main_duration = _duration
-                    assert _main_fps
                     _desc += f'{_duration}, {_codec_type}:{_codec_name} {_d.get("pix_fmt", "")}({_d.get("field_order", "")}), {_d.get("display_aspect_ratio", "")} {_main_resolution}@{_main_fps}fps {bitrate_hum(_main_bitrate)}\n'
                     debug(f'\t*video#{_i}:{_i_v} {_codec_name}:{_codec_type}, {_duration}, {bitrate_hum(_main_bitrate)}, {_main_fps}fps, {_main_resolution}')
                     _i_v += 1
@@ -376,8 +389,11 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                             _cmd_copy_stream += f'-map 0:v:{_i_v} -c:v:{_i_v} copy '
                             debug(f'\tvideo#{_i}:{_i_v} {_codec_name}:{_codec_type} {_pix_fmt}, {_duration}, {bitrate_hum(_bitrate)}')
                         _i_v += 1
-                    elif _codec_type == 'audio':  # 音频流只copy
-                        _cmd_copy_stream += f'-map 0:a:{_i_a} -c:a:{_i_a} copy '
+                    elif _codec_type == 'audio':  # 音频流
+                        if _codec_name != 'aac':  # wmav1/wmav2/wmapro 转为 aac
+                            _cmd_copy_stream += f'-map 0:a:{_i_a} -c:a:{_i_a} aac -async 1 -apad 1 '
+                        else:  # 只copy
+                            _cmd_copy_stream += f'-map 0:a:{_i_a} -c:a:{_i_a} copy '
                         debug(f'\taudio#{_i}:{_i_a} {_codec_name}:{_codec_type}  {_duration}, {bitrate_hum(_bitrate)}')
                         _sample_rate, _channel_layout = _d.get('sample_rate', ''), _d.get('channel_layout', '')
                         _desc += f'{_codec_type}:{_codec_name} {_sample_rate} {_channel_layout} {bitrate_hum(_bitrate)}\n'
@@ -393,7 +409,7 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                         _desc += f'{_codec_type}:{_codec_name} {bitrate_hum(_bitrate)}\n'
                         _i_s += 1
                     elif _codec_type == 'data' and _codec_name == 'bin_data':  # 未知流，抛弃
-                        warn(f'\tdrop stream#{_i}:{_codec_name}/{_codec_type} {_pix_fmt}')
+                        warn(f'\tdrop stream#{_i}:{_codec_name}/{_codec_type} {_pix_fmt} in {fname}')
                         #_cmd_copy_stream += f'-map 0:s:{_i_s} -c:s:{_i_s} copy '
                         #_i_s += 1
                     else:
@@ -405,9 +421,9 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                     _cmd_main_stream += ' -s 1920x1080 '
             if _main_encoder and _main_bitrate and _main_fps and _main_resolution and _main_duration and _cmd_main_stream and _cmd_copy_stream:
                 is_valid = True
-        except:
+        except Exception as e:
             err = _rslt.stderr
-            debug(f'{_rslt.stderr=}')
+            debug(f'{_rslt.stderr=}\n{e=}')
             #raise
 
     return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
@@ -430,7 +446,7 @@ def main():
     #logging.basicConfig(format='%(asctime)s %(levelname).1s %(funcName)+10s:%(lineno).03d| %(message)s', datefmt='%Y%m%d_%H%M%S', level=log_level)
     logging.basicConfig(format='{asctime} {levelname:.1s} {funcName:>10.10s}:{lineno:03d}| {message}', datefmt='%Y%m%d_%H%M%S', style='{', level=log_level)
     
-    MIN_SIZE = 5 * 1024 * 1024 * 1024
+    MIN_SIZE = 0.5 * 1024 * 1024 * 1024
     SIZE_1G = 1 * 1024 *1024 * 1024
     SIZE_2G = 2 * 1024 * 1024 * 1024
     SIZE_3G = 3 * 1024 * 1024 * 1024
@@ -440,7 +456,8 @@ def main():
     l_converted, checked, skipped, check_err, convert_err, converted, total_saved = [], 0, 0, 0, 0, 0, 0
     for root, dirs, files in os.walk(args.src):
         dirs.sort(key=lambda x: x.upper())
-        dirs[:] = [x for x in dirs if not x.startswith('BEST-')]
+        #dirs[:] = [x for x in dirs if not x.startswith('BEST-')]
+        dirs[:] = [x for x in dirs if not x.startswith('BEST-Love.Death')]
         files.sort(key=lambda x: x.upper())
         l_files = [os.path.join(root, x) for x in files if x.endswith(('.mp4', '.avi', '.ts', '.mkv', '.asf', '.wmv', '.mov', '.flv', '.3gp', '.mxf'))]
         for _f in l_files:
@@ -473,24 +490,32 @@ def main():
 
             if not _main_encoder:
                 _valid, _err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc) = check_hevc(_f)
-            assert _valid and _main_encoder
-            _f_converted = '.H265'.join(os.path.splitext(_f))
+                if _err:
+                    check_err += 1
+                    warn(f'skip err file {_err} {_f}')
+                    continue
+            if (not _valid) or (not _main_encoder):
+                warn(f'skip non-valid file {_valid=} {_main_encoder=} {_f}')
+                skipped += 1
+                continue
+            _filebase, _ext = os.path.splitext(_f)
+            if _ext == '.wmv':  # wmv容器不支持h265, 改成mp4
+                _ext = '.mp4'
+            _f_converted = '.H265'.join((_filebase, _ext))
             if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
                 _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)
                 if _valid and abs(hms2sec(_dur) < hms2sec(_main_duration)) < 1:
-                    debug(f'skip converted file {_f}')
+                    info(f'skip converted file {_f}')
                     skipped += 1
                     continue
 
-            _f_converted = '.H265'.join(os.path.splitext(_f))
-            _need = True if _main_encoder != 'hevc' else False
-            info(f'file info: {size_hum(_old_size)} {_desc.replace('\n', ', ')} {"need" if _need else "no_need"} {_err or ""} {_f}')
-            if _err:
-                check_err += 1
-                continue
+            _need = True if _main_encoder != 'hevc'  and _main_encoder != 'av1' else False
             if not _need:
+                if _main_encoder != 'hevc':
+                    warn(f'skip {_main_encoder} file {_f}')
                 skipped += 1
                 continue
+            info(f'file info: {size_hum(_old_size)} {_desc.replace('\n', ', ')} {"need" if _need else "no_need"} {_err or ""} {_f}')
     #        _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d11va -hwaccel_output_format d3d11 -i "{_f}" -c:v hevc_amf -preanalysis true -quality balanced -rc vbr_peak -maxrate {_bitrate} -c:a copy "{_f_converted}"'''
     #        _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d11va -hwaccel_output_format d3d11 -i "{_f}" -c:v hevc_amf -preanalysis true -quality balanced -rc vbr_latency -c:a copy "{_f_converted}"'''
     #        _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" -c:v hevc_amf -preanalysis true -quality balanced -rc hqvbr -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_high_motion_quality_boost_mode auto -c:a copy "{_f_converted}"'''
@@ -511,17 +536,17 @@ def main():
             if _old_size > SIZE_4G:
                 factor = 0.6
             elif _old_size >= SIZE_3G:
-                factor = 0.7
+                factor = 0.65
             elif _old_size >= SIZE_2G:
-                factor = 0.8
+                factor = 0.7
             elif _old_size >= SIZE_1G:
-                factor = 0.85
+                factor = 0.75
             else:
-                factor = 0.9
+                factor = 0.8
 
 #                # 核显解码 独显编码 最初使用
             #_cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
-            _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_initial_qp_after_scene_change 18 -pa_max_qp_before_force_skip 35 -pa_caq_strength high -pa_frame_sad_enable true -pa_ltr_enable true -pa_paq_mode caq -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
+            _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -pix_fmt yuv420p -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_initial_qp_after_scene_change 18 -pa_max_qp_before_force_skip 35 -pa_caq_strength high -pa_frame_sad_enable true -pa_ltr_enable true -pa_paq_mode caq -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
 
             # 独显编解码的具体例子，注意：如果用这个，则滤镜插件的命令cmd_vf也需要改动, 开头加上hwdownload,format=nv12，结尾加上hwupload
             # -vf "hwdownload,format=nv12,scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,hwupload"  因为滤镜需要cpu计算，所以数据要从显存copy到内存，指定为nv12格式，做scale和重设fps，然后再将结果copy回显存
@@ -532,44 +557,46 @@ def main():
 #                _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -usage transcoding -global_quality 28 -rc cqp -qp_i 24 -qp_p 26 -min_qp_i 24 -max_qp_i 24 -min_qp_p 26 -max_qp_p 26 -quality quality -pix_fmt yuv420p {_cmd_copy_stream}  "{_f_converted}"'''
 
             debug(f'convert ({factor=}) to {_f_converted} ...')
-            info(f'{factor=} cmd={_cmd}')
+            info(f'{converted + convert_err + 1}{f"/{args.nr_convert}" if args.nr_convert > 0 else ""} {factor=} cmd={_cmd}')
             if args.nr_convert == 0:
                 warn(f'skip convert file cause nr_convert=0')
                 break
             call_ffmpeg(_cmd, args.use_tqdm)
+            winsound.PlaySound('d:/ding-101492.wav', winsound.SND_FILENAME | winsound.SND_ASYNC)
             _new_size = os.stat(_f_converted).st_size if os.path.exists(_f_converted) else 0
             _single_saved = (_old_size - _new_size) if _new_size else 0
             _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)  # 通过获取信息确定生成的文件是否有效
             if _valid and _single_saved > 0 and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 1:
                 converted += 1
-                info(f'{size_hum(_old_size)} -> {size_hum(_new_size)} saved {size_hum(_single_saved)} {round(_single_saved / _old_size * 100, 2)}% factor_target={round((1 - factor) * 100, 2)}%')
+                info(f'\t{size_hum(_old_size)} -> {size_hum(_new_size)} saved {size_hum(_single_saved)} {round(_single_saved / _old_size * 100, 2)}% factor_target={round((1 - factor) * 100, 2)}%')
                 l_converted.append(_f_converted)
-                if not args.keep_old:
+                if (not args.keep_old) and int(_main_fps) <= 30 and _main_resolution.find('3840') == -1:
                     try:
-                        warn(f'TODO!!!!! to remove old file {_f}')
-                        #os.remove(_f)
-                        #info(f'\told file removed {_f}')
+                        #warn(f'TODO!!!!! to remove old file {_f}')
+                        os.remove(_f)
+                        info(f'\told file removed {_f}')
                     except FileNotFoundError:
-                        debug(f'img file not found. {_f + ".jpg"}')
+                        debug(f'old file not found. {_f}')
                     try:
-                        warn(f'TODO!!!!! to remove img file {_f + ".jpg"}')
-                        #os.remove(_f + '.jpg')
-                        #info(f'\timg file removed {_f + ".jpg"}')
+                        #warn(f'TODO!!!!! to remove img file {_f + ".jpg"}')
+                        os.remove(_f + '.jpg')
+                        info(f'\timg file removed {_f + ".jpg"}')
                     except FileNotFoundError:
                         debug(f'img file not found. {_f + ".jpg"}')
             else:
-                info(f'convert err {_f}')
+                warn(f'convert err {_f}')
                 if _single_saved < 0:  # 转码后尺寸变大了
                     warn(f'converted file is larger!!! {size_hum(_old_size)} -> {size_hum(_new_size)} +{size_hum(abs(_single_saved))}')
                 convert_err += 1
             total_saved += _single_saved
-            if args.nr_convert >0 and (converted >= args.nr_convert or convert_err >= args.nr_convert):
+            if args.nr_convert >0 and (converted + convert_err >= args.nr_convert):
                 break
-        if args.nr_convert >0 and (converted >= args.nr_convert or convert_err >= args.nr_convert):
+        if args.nr_convert >0 and (converted + convert_err >= args.nr_convert):
             break
         
     info(f'done. {checked=:,} {skipped=:,} {check_err=:,} {convert_err=:,} {converted=:,} total_saved={size_hum(total_saved)}')
-    info(f'processed: \n{'\n'.join(l_converted)}')
+    info(f'processed: \n{'\n'.join(f'{_i:>3d}) {_f}' for _i, _f in enumerate(l_converted, start=1))}')
+    winsound.PlaySound('d:/ding-101492.wav', winsound.SND_FILENAME)
 
 if __name__ == "__main__":
     sys.exit(main())
