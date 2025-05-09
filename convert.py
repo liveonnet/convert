@@ -12,9 +12,9 @@ from typing import NamedTuple
 import logging
 import winsound
 from tqdm import tqdm
-info, debug, error, warn = logging.info, logging.debug, logging.error, logging.warning
+info, debug, error, warn, excep = logging.info, logging.debug, logging.error, logging.warning, logging.exception
 
-def sec_hum(sec: int) -> str:
+def sec_hum(sec: int|float) -> str:
     '''将秒数`sec`转换为 H:M:S.N 格式
 
     10.1 -> '00:00:10.1' 
@@ -203,22 +203,27 @@ def call_ffmpeg(cmd: str, use_tqdm: bool = False):
             debug(f'\tnormal exit with {p.returncode}')
 
 
-def calc_bitrate(d:json, file_size: int, duration: float = 0.0) -> int:
+def calc_bitrate(d:json, a: json, file_size: int, duration: float = 0.0) -> int:
     #debug(f'\t\tcalc bitrate ...')
     bitrate = 0
-    if (tags := d.get('tags')):
-        bitrate = int(tags.get('BPS-eng', '0'))
+    if (f := a.get('format')):
+        bitrate = int(f.get('bit_rate', '0'))
+        if bitrate:
+            debug(f'\t\tbitrate in format: {bitrate}')
+    if not bitrate:
+        if (tags := d.get('tags')):
+            bitrate = int(tags.get('BPS-eng', '0'))
+            if bitrate:
+                debug(f'\t\tbitrate in tags["BPS-eng"]: {bitrate}')
     if not bitrate:
         if not duration:
             if (_duration_ts := d.get('duration_ts')) is not None:
                 if (_time_base := d.get('time_base')) is not None:
-                    _time_base_a, _time_base_b = _time_base.splite('/', 2)
+                    _time_base_a, _time_base_b = _time_base.split('/', 2)
                     duration = int(_duration_ts) * int(_time_base_a) / int(_time_base_b)
         if duration:
             bitrate = file_size * 8 / duration
             debug(f'\t\tbitrate calc: {bitrate}')
-    else:
-        debug(f'\t\tbitrate in tags["BPS-eng"]: {bitrate}')
 
     return bitrate
 
@@ -258,7 +263,7 @@ def calc_fps(d: json, duration: float = 0.0) -> int|float:
         debug(f'\t\tfps in tags["r_frame_rate"]: {fps}')
     return fps
 
-def calc_duration(d: json) -> str:
+def calc_duration(d: json, a: json) -> str:
     '''返回形如 H:M:S.NNN 的时间长度
     '''
     #debug(f'\t\tcalc duration ...')
@@ -283,6 +288,11 @@ def calc_duration(d: json) -> str:
                 if _frames and _frm_per_sec:
                     duration = sec_hum(_frames / _frm_per_sec)
                     debug(f'\t\tv duration calc: {duration}')
+        elif (f := a.get('format')):
+            duration = f.get('duration', '')
+            if duration:
+                duration = sec_hum(float(duration))
+                debug(f'\t\tv duration in format: {duration}')
     elif d['codec_type'] == 'audio':
         if (tags := d.get('tags')):
             duration = tags.get('DURATION-eng', '')
@@ -297,6 +307,18 @@ def calc_duration(d: json) -> str:
                 _bytes = int(tags.get('NUMBER_OF_BYTES-eng', '0'))
                 if _bps and _bytes:
                     duration = sec_hum(_bytes * 8 / _bps)
+                    debug(f'\t\ta duration calc: {duration}')
+        elif (f := a.get('format')):
+            duration = f.get('duration', '')
+            if duration:
+                duration = sec_hum(float(duration))
+                debug(f'\t\ta duration in format: {duration}')
+        if not duration:
+            if (_time_base := d.get('time_base')) is not None:
+                _time_base_a, _time_base_b = _time_base.split('/', 2)
+                if (_nb_frames := d.get('nb_frames')) is not None:
+                    duration = int(_nb_frames) * int(_time_base_a) / int(_time_base_b)
+                    duration = sec_hum(duration)
                     debug(f'\t\ta duration calc: {duration}')
     elif d['codec_type'] == 'subtitle':
         if (tags := d.get('tags')):
@@ -336,7 +358,7 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
         return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
 
     _old_size = os.stat(fname).st_size
-    _cmd = f'{ffprobe} -v error -hide_banner -show_streams -of json -i "{fname}"'
+    _cmd = f'{ffprobe} -v error -hide_banner -show_format -show_streams -of json -i "{fname}"'
     #debug(f'\t{_cmd=}')
     _rslt = subprocess.run(shlex.split(_cmd), capture_output=True, text=True, encoding='utf8')
     if _rslt.stdout:
@@ -349,10 +371,12 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                 if _duration:
                     _duration = sec_hum(_duration)
                 if not _duration:
-                    _duration = calc_duration(_d)
+                    _duration = calc_duration(_d, j_data)
+                if not _duration:
+                    error(f'empty duration {_codec_name=} {_codec_type=}')
                 assert _duration
                 if not _bitrate:
-                    _bitrate = calc_bitrate(_d, _old_size, hms2sec(_duration))
+                    _bitrate = calc_bitrate(_d, j_data, _old_size, hms2sec(_duration))
                 if (not _main_encoder) and _codec_type == 'video' and _codec_name != 'mjpeg':
                     _main_encoder, _main_bitrate = _codec_name, _bitrate
                     _cmd_main_stream = f'-map 0:v:{_i_v} -c:v:{_i_v} hevc_amf '
@@ -374,6 +398,7 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
                         else:
                             cmd_vf += ',scale=1920:-1:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2'
                     if (not _main_bitrate) or (not _duration) or (not _main_fps):
+                        warn(f'empty bitrate/duration/fps ? {_main_bitrate=} {_duration=} {_main_fps=}')
                         err = 'empty main_bitrate/duration/fps'
                         return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
                     _main_duration = _duration
@@ -424,6 +449,7 @@ def check_hevc(fname: str, ffprobe: str = 'ffprobe') -> Result:
         except Exception as e:
             err = _rslt.stderr
             debug(f'{_rslt.stderr=}\n{e=}')
+            excep(e)
             #raise
 
     return is_valid, err, (_main_encoder, _main_bitrate, _main_fps, _main_resolution, _main_duration, _cmd_main_stream, _cmd_copy_stream, _desc)
@@ -454,6 +480,9 @@ def main():
     ffprobe = 'ffprobe'
     ffmpeg = 'ffmpeg'
     l_converted, checked, skipped, check_err, convert_err, converted, total_saved = [], 0, 0, 0, 0, 0, 0
+    flag_exit = False
+    _exit_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'exit.txt')
+    debug(f'{_exit_file=}')
     for root, dirs, files in os.walk(args.src):
         dirs.sort(key=lambda x: x.upper())
         #dirs[:] = [x for x in dirs if not x.startswith('BEST-')]
@@ -499,7 +528,7 @@ def main():
                 skipped += 1
                 continue
             _filebase, _ext = os.path.splitext(_f)
-            if _ext == '.wmv':  # wmv容器不支持h265, 改成mp4
+            if _ext != '.mp4':  # wmv/avi等容器不支持h265或支持有限, 改成mp4
                 _ext = '.mp4'
             _f_converted = '.H265'.join((_filebase, _ext))
             if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
@@ -566,7 +595,7 @@ def main():
             _new_size = os.stat(_f_converted).st_size if os.path.exists(_f_converted) else 0
             _single_saved = (_old_size - _new_size) if _new_size else 0
             _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)  # 通过获取信息确定生成的文件是否有效
-            if _valid and _single_saved > 0 and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 1:
+            if _valid and _single_saved > 0 and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 2:
                 converted += 1
                 info(f'\t{size_hum(_old_size)} -> {size_hum(_new_size)} saved {size_hum(_single_saved)} {round(_single_saved / _old_size * 100, 2)}% factor_target={round((1 - factor) * 100, 2)}%')
                 l_converted.append(_f_converted)
@@ -583,15 +612,25 @@ def main():
                         info(f'\timg file removed {_f + ".jpg"}')
                     except FileNotFoundError:
                         debug(f'img file not found. {_f + ".jpg"}')
+                flag_exit = os.path.exists(_exit_file)  # 转码操作完毕后检查下退出文件是否存在
             else:
-                warn(f'convert err {_f}')
+                warn(f'convert err {_f} {_valid=} {_single_saved=} dur_diff={hms2sec(_dur) - hms2sec(_main_duration)}')
                 if _single_saved < 0:  # 转码后尺寸变大了
                     warn(f'converted file is larger!!! {size_hum(_old_size)} -> {size_hum(_new_size)} +{size_hum(abs(_single_saved))}')
                 convert_err += 1
             total_saved += _single_saved
             if args.nr_convert >0 and (converted + convert_err >= args.nr_convert):
                 break
+            if flag_exit:
+                info(f'got exit flag {_exit_file}, stop process.')
+                try:
+                    os.remove(_exit_file)
+                except:
+                    pass
+                break
         if args.nr_convert >0 and (converted + convert_err >= args.nr_convert):
+            break
+        if flag_exit:
             break
         
     info(f'done. {checked=:,} {skipped=:,} {check_err=:,} {convert_err=:,} {converted=:,} total_saved={size_hum(total_saved)}')
