@@ -533,7 +533,7 @@ def main():
             _f_converted = '.H265'.join((_filebase, _ext))
             if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
                 _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)
-                if _valid and abs(hms2sec(_dur) < hms2sec(_main_duration)) < 1:
+                if _valid and abs(hms2sec(_dur) < hms2sec(_main_duration)) < 2:
                     info(f'skip converted file {_f}')
                     skipped += 1
                     continue
@@ -614,7 +614,7 @@ def main():
                         debug(f'img file not found. {_f + ".jpg"}')
                 flag_exit = os.path.exists(_exit_file)  # 转码操作完毕后检查下退出文件是否存在
             else:
-                warn(f'convert err {_f} {_valid=} {_single_saved=} dur_diff={hms2sec(_dur) - hms2sec(_main_duration)}')
+                warn(f'convert error {_f} {_valid=} {_single_saved=} dur_diff={hms2sec(_dur) - hms2sec(_main_duration)}')
                 if _single_saved < 0:  # 转码后尺寸变大了
                     warn(f'converted file is larger!!! {size_hum(_old_size)} -> {size_hum(_new_size)} +{size_hum(abs(_single_saved))}')
                 convert_err += 1
