@@ -462,17 +462,19 @@ def main():
     parser.add_argument('-k', '--keep_old', action='store_true', help='保留源文件', default=False)
     parser.add_argument('-i', '--log_level', choices=['info', 'debug'], default='debug', help='设置日志级别 (默认: debug)')
     parser.add_argument('-n', '--nr_convert', type=int, default=1, help='处理多少个文件就退出，默认为1')
+    parser.add_argument('-f', '--factor', type=float, default=0, help='体积缩小比例, 比如0.6代表目标码率是原来的0.6倍, 默认0，表示让程序根据视频大小自己确定')
     args = parser.parse_args()
     print(f'src: {args.src}')
     print(f'use_tqdm: {args.use_tqdm}')
     print(f'keep_old: {args.keep_old}')
     print(f'log_level: {args.log_level}')
     print(f'nr_convert: {args.nr_convert}')
+    print(f'factor: {args.factor}')
     log_level = getattr(logging, args.log_level.upper())
     #logging.basicConfig(format='%(asctime)s %(levelname).1s %(funcName)+10s:%(lineno).03d| %(message)s', datefmt='%Y%m%d_%H%M%S', level=log_level)
     logging.basicConfig(format='{asctime} {levelname:.1s} {funcName:>10.10s}:{lineno:03d}| {message}', datefmt='%Y%m%d_%H%M%S', style='{', level=log_level)
     
-    MIN_SIZE = 0.5 * 1024 * 1024 * 1024
+    MIN_SIZE = 0.4 * 1024 * 1024 * 1024
     SIZE_1G = 1 * 1024 *1024 * 1024
     SIZE_2G = 2 * 1024 * 1024 * 1024
     SIZE_3G = 3 * 1024 * 1024 * 1024
@@ -533,7 +535,7 @@ def main():
             _f_converted = '.H265'.join((_filebase, _ext))
             if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
                 _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)
-                if _valid and abs(hms2sec(_dur) < hms2sec(_main_duration)) < 2:
+                if _valid and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 2:
                     info(f'skip converted file {_f}')
                     skipped += 1
                     continue
@@ -562,16 +564,19 @@ def main():
             # 核显解码 独显编码
     #        _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" -map 0 -c:v hevc_amf -preanalysis true -quality balanced -rc vbr_peak -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_high_motion_quality_boost_mode auto -c:a copy -c:s copy -profile:v main -b:v {int(_main_bitrate * 0.7)} -maxrate {_main_bitrate} "{_f_converted}"'''
 
-            if _old_size > SIZE_4G:
-                factor = 0.6
-            elif _old_size >= SIZE_3G:
-                factor = 0.65
-            elif _old_size >= SIZE_2G:
-                factor = 0.7
-            elif _old_size >= SIZE_1G:
-                factor = 0.75
+            if args.factor < 0.01:
+                if _old_size > SIZE_4G:
+                    factor = 0.6
+                elif _old_size >= SIZE_3G:
+                    factor = 0.65
+                elif _old_size >= SIZE_2G:
+                    factor = 0.7
+                elif _old_size >= SIZE_1G:
+                    factor = 0.75
+                else:
+                    factor = 0.8
             else:
-                factor = 0.8
+                factor = args.factor
 
 #                # 核显解码 独显编码 最初使用
             #_cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -preanalysis true -quality balanced -rc vbr_peak -fps_mode passthrough -fflags +genpts -skip_frame 1 -high_motion_quality_boost_enable true -preencode true -pa_scene_change_detection_enable true -pa_scene_change_detection_sensitivity high -pa_static_scene_detection_enable true -pa_static_scene_detection_sensitivity high -pa_high_motion_quality_boost_mode auto -pa_lookahead_buffer_depth 40 -vbaq true -pa_taq_mode 2 -profile:v main -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} {_cmd_copy_stream}  "{_f_converted}"'''
