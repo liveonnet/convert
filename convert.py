@@ -231,8 +231,11 @@ def hms2sec(d: str) -> float:
     '''
     将 `H:M:S.NNN` 形式的`d`字符串转换为以秒为单位的浮点数形式数字
     '''
-    _h, _m, _s = d.split(':', 3)
-    return int(_h) * 3600 + int(_m) * 60 + float(_s)
+    try:
+        _h, _m, _s = d.split(':', 3)
+        return int(_h) * 3600 + int(_m) * 60 + float(_s)
+    except:
+        return 0
 
 def calc_fps(d: json, duration: float = 0.0) -> int|float:
     fps = 0
@@ -472,9 +475,9 @@ def main():
     print(f'factor: {args.factor}')
     log_level = getattr(logging, args.log_level.upper())
     #logging.basicConfig(format='%(asctime)s %(levelname).1s %(funcName)+10s:%(lineno).03d| %(message)s', datefmt='%Y%m%d_%H%M%S', level=log_level)
-    logging.basicConfig(format='{asctime} {levelname:.1s} {funcName:>10.10s}:{lineno:03d}| {message}', datefmt='%Y%m%d_%H%M%S', style='{', level=log_level)
+    logging.basicConfig(format='{asctime} {levelname:.1s} {funcName:>10.10s}:{lineno:03d}| {message}', datefmt='%y%m%d_%H%M%S', style='{', level=log_level)
     
-    MIN_SIZE = 0.4 * 1024 * 1024 * 1024
+    MIN_SIZE = 0.8 * 1024 * 1024 * 1024
     SIZE_1G = 1 * 1024 *1024 * 1024
     SIZE_2G = 2 * 1024 * 1024 * 1024
     SIZE_3G = 3 * 1024 * 1024 * 1024
@@ -488,7 +491,7 @@ def main():
     for root, dirs, files in os.walk(args.src):
         dirs.sort(key=lambda x: x.upper())
         #dirs[:] = [x for x in dirs if not x.startswith('BEST-')]
-        dirs[:] = [x for x in dirs if not x.startswith('BEST-Love.Death')]
+        dirs[:] = [x for x in dirs if not x.startswith(('tmp', 'BEST-Love.Death'))]
         files.sort(key=lambda x: x.upper())
         l_files = [os.path.join(root, x) for x in files if x.endswith(('.mp4', '.avi', '.ts', '.mkv', '.asf', '.wmv', '.mov', '.flv', '.3gp', '.mxf'))]
         for _f in l_files:
@@ -508,8 +511,12 @@ def main():
                     debug(f'skip h265 file {_f}')
                     skipped += 1
                     continue
+                elif _valid and _main_encoder == 'av1':
+                    debug(f'skip av1 file {_f}')
+                    skipped += 1
+                    continue
                 else:
-                    warn(f'skip BAD h265 file {_f}')
+                    warn(f'skip BAD h265 file {_f} {_valid=} {_main_encoder=}')
                     skipped += 1
                     continue
 
@@ -536,7 +543,8 @@ def main():
             if os.path.exists(_f_converted):  # 对应的带.H265字样的文件存在，检查对应的文件是否是有效的H265文件
                 _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)
                 if _valid and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 2:
-                    info(f'skip converted file {_f}')
+                    _converted_size = os.stat(_f_converted).st_size
+                    info(f'skip converted file {_f} {size_hum(_old_size)} -> {size_hum(_converted_size)} {round(_converted_size / _old_size * 100, 2)}%')
                     skipped += 1
                     continue
 
@@ -590,6 +598,14 @@ def main():
 #                _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -usage transcoding -rc qvbr -qvbr_quality_level 28 -qp_i 24 -qp_p 26 -min_qp_i 24 -max_qp_i 24 -min_qp_p 26 -max_qp_p 26 -preset quality -g {int(10 * round(_main_fps))} -profile:v main -header_insertion_mode gop -preanalysis true -bf 4 -refs 5 -bufsize {_main_bitrate * 2} -maxrate {_main_bitrate} {_cmd_copy_stream}  "{_f_converted}"'''
 #                _cmd = f'''{ffmpeg} -hide_banner -log_level error -hwaccel d3d12va -i "{_f}" {_cmd_main_stream} -usage transcoding -global_quality 28 -rc cqp -qp_i 24 -qp_p 26 -min_qp_i 24 -max_qp_i 24 -min_qp_p 26 -max_qp_p 26 -quality quality -pix_fmt yuv420p {_cmd_copy_stream}  "{_f_converted}"'''
 
+            # 11320H + MX450 只使用核显编解码
+#            _cmd = f'''{ffmpeg} -hide_banner -hwaccel qsv -hwaccel_output_format qsv -i "{_f}" -c:v hevc_qsv -preset veryslow -global_quality 23 -look_ahead 1 -b_strategy 1 -g 60 -c:a copy -y "{_f_converted}"'''
+            _cmd = f'''{ffmpeg} -hide_banner -hwaccel qsv -hwaccel_output_format qsv -i "{_f}" -c:v hevc_qsv -preset veryslow -global_quality 23 -look_ahead 1 -b_strategy 1 -g 125 -c:a copy -y "{_f_converted}"'''
+            _cmd_main_stream = _cmd_main_stream.replace('hevc_amf', 'hevc_qsv')
+            #_cmd_main_stream = '-c:v hevc_qsv'
+#            _cmd = f'''ffmpeg -hide_banner -hwaccel qsv -hwaccel_output_format qsv -i "{_f}" {_cmd_main_stream} -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} -look_ahead 1 -b_strategy 1 -g 125 {_cmd_copy_stream} -y "{_f_converted}"'''
+            _cmd = f'''ffmpeg -hide_banner -hwaccel qsv -hwaccel_output_format qsv -i "{_f}" -map 0:v:0 -map 0:a? -map 0:s? -c:v hevc_qsv -b:v {int(_main_bitrate * factor)} -maxrate {_main_bitrate} -bufsize {_main_bitrate * 2} -look_ahead 1 -b_strategy 1 -g 125 -c:a copy -c:s copy -dn -y "{_f_converted}"'''
+
             debug(f'convert ({factor=}) to {_f_converted} ...')
             info(f'{converted + convert_err + 1}{f"/{args.nr_convert}" if args.nr_convert > 0 else ""} {factor=} cmd={_cmd}')
             if args.nr_convert == 0:
@@ -599,7 +615,7 @@ def main():
             winsound.PlaySound('d:/ding-101492.wav', winsound.SND_FILENAME | winsound.SND_ASYNC)
             _new_size = os.stat(_f_converted).st_size if os.path.exists(_f_converted) else 0
             _single_saved = (_old_size - _new_size) if _new_size else 0
-            _valid, _, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)  # 通过获取信息确定生成的文件是否有效
+            _valid, _err, (_, _, _, _, _dur, _, _, _) = check_hevc(_f_converted)  # 通过获取信息确定生成的文件是否有效
             if _valid and _single_saved > 0 and abs(hms2sec(_dur) - hms2sec(_main_duration)) < 2:
                 converted += 1
                 info(f'\t{size_hum(_old_size)} -> {size_hum(_new_size)} saved {size_hum(_single_saved)} {round(_single_saved / _old_size * 100, 2)}% factor_target={round((1 - factor) * 100, 2)}%')
@@ -619,7 +635,7 @@ def main():
                         debug(f'img file not found. {_f + ".jpg"}')
                 flag_exit = os.path.exists(_exit_file)  # 转码操作完毕后检查下退出文件是否存在
             else:
-                warn(f'convert error {_f} {_valid=} {_single_saved=} dur_diff={hms2sec(_dur) - hms2sec(_main_duration)}')
+                warn(f'convert error {_f} {_valid=} {_single_saved=} dur_diff={hms2sec(_dur) - hms2sec(_main_duration)} {_err}')
                 if _single_saved < 0:  # 转码后尺寸变大了
                     warn(f'converted file is larger!!! {size_hum(_old_size)} -> {size_hum(_new_size)} +{size_hum(abs(_single_saved))}')
                 convert_err += 1
